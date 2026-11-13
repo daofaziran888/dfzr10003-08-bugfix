@@ -7,23 +7,24 @@ const columns = [
   "任务编号",
   "任务名称",
   "依赖任务",
+  "依赖表",
   "调度表达式",
   "重试次数",
   "超时分钟",
   "告警渠道",
-  "任务状态"
+  "任务状态",
+  "阻断状态",
+  "待处理原因",
+  "状态"
 ]
-const actions = [
-  "启动任务",
-  "暂停任务",
-  "归档任务"
-]
-const statuses = [
-  "草稿",
-  "运行中",
-  "已暂停",
-  "已完成"
-]
+// 状态机：草稿/待处理 → 运行中 → 已暂停 → 已完成；待处理任务需先解除质量阻断
+const ACTIONS_BY_STATUS: Record<string, string[]> = {
+  '草稿': ['启动任务'],
+  '待处理': ['启动任务'],
+  '运行中': ['暂停任务'],
+  '已暂停': ['归档任务'],
+  '已完成': [],
+}
 const stats = [
   {
     "label": "调度任务总数",
@@ -39,12 +40,20 @@ const stats = [
   }
 ]
 
-type Row = Record<string, string | number | null>
+type Row = Record<string, unknown>
+
+function formatCell(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '—'
+  if (Array.isArray(value)) return value.length ? value.join('、') : '—'
+  if (typeof value === 'boolean') return value ? '是' : '否'
+  return String(value)
+}
 
 export default function EtlView() {
   const [rows, setRows] = useState<Row[]>([])
   const [total, setTotal] = useState(0)
   const [errorMessage, setErrorMessage] = useState('')
+  const [noticeMessage, setNoticeMessage] = useState('')
   const [filters, setFilters] = useState<Record<string, string>>({})
   const filterFields = useMemo(() => columns.slice(0, 3), [])
 
@@ -57,7 +66,8 @@ export default function EtlView() {
         throw new Error('调度任务列表读取失败')
       }
       const payload = await response.json()
-      setRows(payload.items ?? [])
+      const items = (payload.items ?? []).map((item: Row) => ({ ...item, 状态: item['状态'] ?? item.status }))
+      setRows(items)
       setTotal(payload.total ?? 0)
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'ETL任务调度列表读取失败')
@@ -70,17 +80,22 @@ export default function EtlView() {
 
   async function runAction(action: string, row: Row) {
     setErrorMessage('')
+    setNoticeMessage('')
     try {
       const response = await request(`${ENDPOINT}/${row.id}/actions`, {
         method: 'POST',
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ values: { action } }),
       })
-      if (!response.ok) {
-        throw new Error('ETL任务调度动作未生效，请稍后重试')
+      const payload = await response.json()
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.message ?? 'ETL任务调度动作未生效，请稍后重试')
       }
+      setNoticeMessage(payload.message ?? `调度任务已${action}`)
       await reload()
     } catch (error) {
+      // 质量阻断等原因导致的拒绝也要刷新列表，让待处理原因与质量页保持一致
       setErrorMessage(error instanceof Error ? error.message : 'ETL任务调度操作失败')
+      await reload()
     }
   }
 
@@ -135,9 +150,9 @@ export default function EtlView() {
         <tbody>
           {rows.map((row) => (
             <tr key={String(row.id)}>
-              {columns.map((column) => <td key={column}>{row[column] ?? '—'}</td>)}
+              {columns.map((column) => <td key={column}>{formatCell(row[column])}</td>)}
               <td className="row-actions">
-                {actions.map((action) => (
+                {(ACTIONS_BY_STATUS[String(row['状态'] ?? '')] ?? []).map((action) => (
                   <button key={action} className="link" type="button" onClick={() => void runAction(action, row)}>
                     {action}
                   </button>
@@ -155,6 +170,7 @@ export default function EtlView() {
 
       <footer className="page-foot">
         <span>共 {total} 条ETL任务调度记录</span>
+        {noticeMessage && <span>{noticeMessage}</span>}
         {errorMessage && <span className="error-text">{errorMessage}</span>}
       </footer>
     </section>
